@@ -3,66 +3,142 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>AR Cube with Three.js</title>
+    <title>AR Multiplayer Cube</title>
     <style>
         body { margin: 0; overflow: hidden; }
         canvas { display: block; }
         #startAR { position: absolute; top: 50%; left: 50%; transform: translate(-50%, -50%);
                    padding: 10px 20px; font-size: 18px; background: green; color: white; border: none; cursor: pointer; }
+        #debug { position: absolute; bottom: 10px; left: 10px; background: rgba(0,0,0,0.5); color: white; padding: 10px; font-family: monospace; }
     </style>
 </head>
 <body>
     <button id="startAR">Start AR</button>
+    <div id="debug"></div>
     
     <script src="https://cdnjs.cloudflare.com/ajax/libs/three.js/r128/three.min.js"></script>
-    
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/socket.io/4.5.4/socket.io.min.js"></script>
+
     <script>
         let scene, camera, renderer, cube;
         let xrSession = null;
         let xrRefSpace = null;
+        let players = {}; // Store other players
+        const playerId = Math.random().toString(36).substr(2, 9); // Unique ID
+        let debugEl = document.getElementById('debug');
+
+        // Connect to WebSocket server - specify secure WebSocket
+        const socket = io({
+            secure: true,
+            reconnection: true,
+            rejectUnauthorized: false // Accept self-signed certificate
+        });
+
+        // Debug logging function
+        function log(message) {
+            console.log(message);
+            if (debugEl) {
+                debugEl.innerHTML += message + '<br>';
+                // Keep only the last 5 messages
+                const lines = debugEl.innerHTML.split('<br>');
+                if (lines.length > 6) {
+                    debugEl.innerHTML = lines.slice(lines.length - 6).join('<br>');
+                }
+            }
+        }
+
+        // Socket connection events
+        socket.on('connect', () => {
+            log('Connected to server!');
+        });
+
+        socket.on('disconnect', () => {
+            log('Disconnected from server!');
+        });
+
+        socket.on('connect_error', (error) => {
+            log('Connection error: ' + error);
+        });
 
         function initScene() {
+            log('Initializing scene...');
             scene = new THREE.Scene();
 
             camera = new THREE.PerspectiveCamera(75, window.innerWidth / window.innerHeight, 0.1, 1000);
-            camera.position.set(0, 1.5, 3); // Position camera slightly above ground
+            camera.position.set(0, 1.5, 3);
 
             renderer = new THREE.WebGLRenderer({ alpha: true, antialias: true });
             renderer.setSize(window.innerWidth, window.innerHeight);
             renderer.xr.enabled = true;
             document.body.appendChild(renderer.domElement);
 
-            // Cube
-            const geometry = new THREE.BoxGeometry(0.2, 0.2, 0.2); // Smaller cube for AR
+            // Create a cube
+            const geometry = new THREE.BoxGeometry(0.2, 0.2, 0.2);
             const material = new THREE.MeshBasicMaterial({ color: 0x00ff00 });
             cube = new THREE.Mesh(geometry, material);
-            cube.position.set(0, 1, -1); // Move cube in front of the camera
+            cube.position.set(0, 1, -1); // Position in front of the user
             scene.add(cube);
+            log('Added cube to scene');
 
-            // Lighting
+            // Add lighting
             const light = new THREE.AmbientLight(0xffffff);
             scene.add(light);
 
+            // Define the animate function
+            function animate() {
+                renderer.setAnimationLoop(render);
+            }
+
+            function render() {
+                renderer.render(scene, camera);
+            }
+
+            // Start the animation loop
             animate();
+            log('Animation started');
         }
 
         async function startAR() {
+            log('Starting AR...');
             if (!navigator.xr) {
                 alert("WebXR not supported on this device.");
+                log('WebXR not supported');
                 return;
             }
 
             try {
-                xrSession = await navigator.xr.requestSession("immersive-ar", { requiredFeatures: ["local-floor"] });
+                // Check if immersive-ar is supported
+                const isSupported = await navigator.xr.isSessionSupported('immersive-ar');
+                if (!isSupported) {
+                    alert("Immersive AR not supported on this device.");
+                    log('Immersive AR not supported');
+                    return;
+                }
+
+                log('Requesting AR session...');
+                xrSession = await navigator.xr.requestSession("immersive-ar", { 
+                    requiredFeatures: ["local-floor"],
+                    optionalFeatures: ["dom-overlay"],
+                    domOverlay: { root: document.body }
+                });
+                
                 renderer.xr.setSession(xrSession);
+                log('XR session started');
 
                 xrRefSpace = await xrSession.requestReferenceSpace("local-floor");
+                log('Reference space created');
 
                 document.getElementById("startAR").style.display = "none";
-
+                
+                // Place the cube 1 meter in front of the user
+                cube.position.set(0, 0, -1);
+                
+                // Start AR rendering
                 xrSession.requestAnimationFrame(onXRFrame);
+                log('First frame requested');
             } catch (error) {
                 console.error("Failed to start AR session:", error);
+                log('AR session error: ' + error.message);
             }
         }
 
@@ -71,18 +147,62 @@
             let pose = frame.getViewerPose(xrRefSpace);
 
             if (pose) {
-                cube.rotation.y += 0.01;
-                renderer.render(scene, camera);
+                const view = pose.views[0];
+                const position = view.transform.position;
+                const rotation = view.transform.orientation;
+
+                // Update the debug info
+                log(`Position: ${position.x.toFixed(2)}, ${position.y.toFixed(2)}, ${position.z.toFixed(2)}`);
+
+                // Send position to server
+                socket.emit('update_position', {
+                    id: playerId,
+                    position: { x: position.x, y: position.y, z: position.z },
+                    rotation: { x: rotation.x, y: rotation.y, z: rotation.z, w: rotation.w }
+                });
+
+                // Position the cube relative to the camera
+                cube.position.set(0, 0, -1); // 1 meter in front
+                cube.rotation.y += 0.01; // Rotate slightly to show it's working
             }
 
+            renderer.render(scene, camera);
             session.requestAnimationFrame(onXRFrame);
         }
 
-        function animate() {
-            cube.rotation.y += 0.01;
-            renderer.render(scene, camera);
-            requestAnimationFrame(animate);
-        }
+        // Update other players
+        socket.on('players_update', (data) => {
+            log(`Received update for ${Object.keys(data).length} players`);
+            
+            Object.keys(data).forEach(id => {
+                if (id !== playerId) {
+                    let player = players[id];
+
+                    if (!player) {
+                        // Create a sphere for each player
+                        const geometry = new THREE.SphereGeometry(0.2, 16, 16);
+                        const material = new THREE.MeshBasicMaterial({ color: 0xff0000 });
+                        player = new THREE.Mesh(geometry, material);
+                        scene.add(player);
+                        players[id] = player;
+                        log(`Created new player: ${id}`);
+                    }
+
+                    // Update position
+                    const pos = data[id].position;
+                    player.position.set(pos.x, pos.y, pos.z);
+                }
+            });
+
+            // Remove players who left
+            Object.keys(players).forEach(id => {
+                if (!data[id] && id !== playerId) {
+                    scene.remove(players[id]);
+                    delete players[id];
+                    log(`Removed player: ${id}`);
+                }
+            });
+        });
 
         document.getElementById("startAR").addEventListener("click", startAR);
 
@@ -92,7 +212,8 @@
             renderer.setSize(window.innerWidth, window.innerHeight);
         });
 
-        initScene();
+        // Initialize the scene when the page loads
+        window.addEventListener('DOMContentLoaded', initScene);
     </script>
 </body>
 </html>
