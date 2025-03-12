@@ -5,16 +5,51 @@
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>AR Multiplayer Cube</title>
     <style>
-        body { margin: 0; overflow: hidden; }
-        canvas { display: block; }
-        #startAR { position: absolute; top: 50%; left: 50%; transform: translate(-50%, -50%);
-                   padding: 10px 20px; font-size: 18px; background: green; color: white; border: none; cursor: pointer; }
-        #debug { position: absolute; bottom: 10px; left: 10px; background: rgba(0,0,0,0.5); color: white; padding: 10px; font-family: monospace; }
+        body { 
+            margin: 0; 
+            overflow: hidden; 
+            background-color: #000000;
+        }
+        canvas { 
+            display: block;
+        }
+        #startAR { 
+            position: absolute; 
+            top: 50%; 
+            left: 50%; 
+            transform: translate(-50%, -50%);
+            padding: 10px 20px; 
+            font-size: 18px; 
+            background: green; 
+            color: white; 
+            border: none; 
+            cursor: pointer;
+        }
+        #debug { 
+            position: absolute; 
+            bottom: 10px; 
+            left: 10px; 
+            background: rgba(0,0,0,0.5); 
+            color: white; 
+            padding: 10px; 
+            font-family: monospace;
+        }
+        #fallbackInfo {
+            position: absolute;
+            top: 10px;
+            left: 10px;
+            color: white;
+            background: rgba(0,0,0,0.5);
+            padding: 10px;
+            font-family: sans-serif;
+            display: none;
+        }
     </style>
 </head>
 <body>
     <button id="startAR">Start AR</button>
     <div id="debug"></div>
+    <div id="fallbackInfo">FALLBACK MODE: Use WASD to move and mouse to look around</div>
     
     <script src="https://cdnjs.cloudflare.com/ajax/libs/three.js/r128/three.min.js"></script>
     <script src="https://cdnjs.cloudflare.com/ajax/libs/socket.io/4.5.4/socket.io.min.js"></script>
@@ -24,8 +59,18 @@
         let xrSession = null;
         let xrRefSpace = null;
         let players = {}; // Store other players
+        let fallbackMode = false;
+        let moveForward = false;
+        let moveBackward = false;
+        let moveLeft = false;
+        let moveRight = false;
+        let moveSpeed = 0.1;
+        let playerVelocity = new THREE.Vector3();
+        let playerDirection = new THREE.Vector3();
+        let clock = new THREE.Clock();
         const playerId = Math.random().toString(36).substr(2, 9); // Unique ID
         let debugEl = document.getElementById('debug');
+        let fallbackInfoEl = document.getElementById('fallbackInfo');
 
         // Connect to WebSocket server - specify secure WebSocket
         const socket = io({
@@ -63,12 +108,13 @@
         function initScene() {
             log('Initializing scene...');
             scene = new THREE.Scene();
-
+        
             camera = new THREE.PerspectiveCamera(75, window.innerWidth / window.innerHeight, 0.1, 1000);
-            camera.position.set(0, 1.5, 3);
+            camera.position.set(0, 1.6, 3); // Eye level height
 
             renderer = new THREE.WebGLRenderer({ alpha: true, antialias: true });
             renderer.setSize(window.innerWidth, window.innerHeight);
+            
             renderer.xr.enabled = true;
             document.body.appendChild(renderer.domElement);
 
@@ -83,26 +129,144 @@
             // Add lighting
             const light = new THREE.AmbientLight(0xffffff);
             scene.add(light);
-
-            // Define the animate function
-            function animate() {
-                renderer.setAnimationLoop(render);
-            }
-
-            function render() {
-                renderer.render(scene, camera);
-            }
-
+            
+            // Add a grid to help with orientation in fallback mode
+            const gridHelper = new THREE.GridHelper(20, 20, 0x444444, 0x444444);
+            scene.add(gridHelper);
+            
             // Start the animation loop
             animate();
             log('Animation started');
+
+            // Check if WebXR is supported
+            if (!navigator.xr) {
+                log('WebXR not supported, activating fallback mode');
+                activateFallbackMode();
+            } else {
+                navigator.xr.isSessionSupported('immersive-ar').then(supported => {
+                    if (!supported) {
+                        log('Immersive AR not supported, activating fallback mode');
+                        activateFallbackMode();
+                    }
+                });
+            }
+        }
+
+        function activateFallbackMode() {
+            fallbackMode = true;
+            fallbackInfoEl.style.display = 'block';
+            document.getElementById('startAR').style.display = 'none';
+
+            
+
+
+            // Setup keyboard controls
+            document.addEventListener('keydown', onKeyDown, false);
+            document.addEventListener('keyup', onKeyUp, false);
+            
+            // Setup mouse controls for looking around
+            document.addEventListener('mousemove', onMouseMove, false);
+            
+            // Lock pointer for mouse control
+            renderer.domElement.addEventListener('click', () => {
+                renderer.domElement.requestPointerLock();
+            });
+            
+            log('Fallback mode activated - click screen to control with mouse');
+        }
+
+        function onKeyDown(event) {
+            switch (event.code) {
+                case 'KeyW':
+                    moveForward = true;
+                    break;
+                case 'KeyA':
+                    moveLeft = true;
+                    break;
+                case 'KeyS':
+                    moveBackward = true;
+                    break;
+                case 'KeyD':
+                    moveRight = true;
+                    break;
+            }
+        }
+
+        function onKeyUp(event) {
+            switch (event.code) {
+                case 'KeyW':
+                    moveForward = false;
+                    break;
+                case 'KeyA':
+                    moveLeft = false;
+                    break;
+                case 'KeyS':
+                    moveBackward = false;
+                    break;
+                case 'KeyD':
+                    moveRight = false;
+                    break;
+            }
+        }
+
+        function onMouseMove(event) {
+            if (document.pointerLockElement === renderer.domElement) {
+                const movementX = event.movementX || 0;
+                const movementY = event.movementY || 0;
+                
+                // Rotate camera based on mouse movement
+                camera.rotation.y -= movementX * 0.002;
+                
+                // Limit vertical look
+                const verticalLook = camera.rotation.x - movementY * 0.002;
+                camera.rotation.x = Math.max(-Math.PI/2, Math.min(Math.PI/2, verticalLook));
+            }
+        }
+
+        function updateFallbackControls() {
+            if (!fallbackMode) return;
+            
+            const delta = clock.getDelta();
+            
+            // Calculate movement direction
+            playerDirection.z = Number(moveForward) - Number(moveBackward);
+            playerDirection.x = Number(moveRight) - Number(moveLeft);
+            playerDirection.normalize();
+            
+            // Convert player direction to camera-relative direction
+            const angle = camera.rotation.y;
+            playerVelocity.x = playerDirection.x * Math.cos(angle) + playerDirection.z * Math.sin(angle);
+            playerVelocity.z = playerDirection.z * Math.cos(angle) - playerDirection.x * Math.sin(angle);
+            
+            // Apply movement
+            camera.position.x += playerVelocity.x * moveSpeed;
+            camera.position.z += playerVelocity.z * moveSpeed;
+            
+            // Send position update to server
+            socket.emit('update_position', {
+                id: playerId,
+                position: { 
+                    x: camera.position.x, 
+                    y: camera.position.y, 
+                    z: camera.position.z 
+                },
+                rotation: { 
+                    x: camera.quaternion.x, 
+                    y: camera.quaternion.y, 
+                    z: camera.quaternion.z, 
+                    w: camera.quaternion.w 
+                }
+            });
+            
+            // Display current position in debug
+            log(`Position: ${camera.position.x.toFixed(2)}, ${camera.position.y.toFixed(2)}, ${camera.position.z.toFixed(2)}`);
         }
 
         async function startAR() {
             log('Starting AR...');
             if (!navigator.xr) {
-                alert("WebXR not supported on this device.");
-                log('WebXR not supported');
+                alert("WebXR not supported on this device. Switching to fallback mode.");
+                activateFallbackMode();
                 return;
             }
 
@@ -110,8 +274,8 @@
                 // Check if immersive-ar is supported
                 const isSupported = await navigator.xr.isSessionSupported('immersive-ar');
                 if (!isSupported) {
-                    alert("Immersive AR not supported on this device.");
-                    log('Immersive AR not supported');
+                    alert("Immersive AR not supported on this device. Switching to fallback mode.");
+                    activateFallbackMode();
                     return;
                 }
 
@@ -139,6 +303,7 @@
             } catch (error) {
                 console.error("Failed to start AR session:", error);
                 log('AR session error: ' + error.message);
+                activateFallbackMode();
             }
         }
 
@@ -150,6 +315,10 @@
                 const view = pose.views[0];
                 const position = view.transform.position;
                 const rotation = view.transform.orientation;
+
+                // Update the camera to match the AR view
+                camera.position.set(position.x, position.y, position.z);
+                camera.rotation.set(rotation.x, rotation.y, rotation.z, rotation.w);
 
                 // Update the debug info
                 log(`Position: ${position.x.toFixed(2)}, ${position.y.toFixed(2)}, ${position.z.toFixed(2)}`);
@@ -168,6 +337,35 @@
 
             renderer.render(scene, camera);
             session.requestAnimationFrame(onXRFrame);
+        }
+
+
+        function animate() {
+            if (xrSession) {
+                // AR rendering
+                renderer.setAnimationLoop(render);
+            } else {
+                // Fallback mode rendering
+                requestAnimationFrame(animate);
+                updateFallbackControls();
+                render();
+            }
+        }
+
+
+        function render() {
+            if (fallbackMode) {
+                // In fallback mode, position the cube in front of the camera
+                const distance = 1; // 1 meter in front
+                const vector = new THREE.Vector3(0, 0, -distance);
+                vector.applyQuaternion(camera.quaternion);
+                //cube.position.copy(camera.position).add(vector);
+                
+                // Add a slight rotation to make it visible
+                cube.rotation.y += 0.01;
+            }
+            
+            renderer.render(scene, camera);
         }
 
         // Update other players
